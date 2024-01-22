@@ -24,10 +24,14 @@ from xformers.ops.fmha.attn_bias import (
     BlockDiagonalCausalWithOffsetPaddedKeysMask as AttnBias,
 )
 
+# from xformers.ops.fmha.attn_bias import (
+#     BlockDiagonalMask as AttnBias,
+# )
+
 
 @dataclass
 class GenArgs:
-    gen_length: int = 100
+    gen_length: int = 3000
 
     use_sampling: bool = True
     temperature: float = 0.6
@@ -100,6 +104,9 @@ class FastGen:
     def generate_all(
         self, prompts: list[list[int]], use_cuda_graphs: bool
     ) -> Tuple[Stats, list[list[int]]]:
+        
+        for i in range(2048-18):
+            prompts[0].append(i+666)
         bs = len(prompts)
         prompt_lens = [len(p) for p in prompts]
         max_prompt_length = max(prompt_lens)
@@ -116,7 +123,12 @@ class FastGen:
             kv_seqlen=prompt_lens,
             kv_padding=max_seq_length,
         )
-        print("prompt_lens: ", prompt_lens)
+        # print(bias.q_seqinfo.seqstart_py[-1])
+        # print(bias.k_seqinfo.seqstart_py[-1])
+        # mask = bias.materialize(shape=[18, 118])
+        # print(mask)
+        # print(mask.shape)
+        
         bias.q_seqinfo.to("cuda")
         bias.k_seqinfo.to("cuda")
 
@@ -127,26 +139,22 @@ class FastGen:
         kv_seqlen = bias.k_seqinfo.seqlen
         print("q_seqstart: ", q_seqstart)
         print("kv_seqlen: ", kv_seqlen)
-        print("prompts: ", prompts)
+        # print("prompts: ", prompts)
         tokens = torch.IntTensor(sum(prompts, [])).cuda()
-        print("tokens: ", tokens)
+        # print("tokens: ", tokens)
         out_tokens = torch.zeros((max_seq_length, bs), dtype=torch.int)
 
         stats = Stats()
         stats.phase("warmup" if use_cuda_graphs else "total")
 
-        for niter in range(gen_length):
-            if niter <= self.GRAPH_WARMUPS or not use_cuda_graphs:
-                # Keep the first iteration out of the
-                # warmup, it processes prompts while all
-                # other iterations process sequences of 0
-                # or 1 token only
+        for niter in range(2):
+
+            if niter == 0:
                 output = self.model.forward_with_attn_bias(
                     token_values=tokens,
                     attn_bias=bias,
                     cache=cache,
                 )
-            elif niter == self.GRAPH_WARMUPS + 1:
                 recording_kwargs = {}
                 if "capture_error_mode" in torch.cuda.graph.__init__.__annotations__:
                     # In PyTorch 2.1+ and nightlies from late Aug 2023,
@@ -158,12 +166,11 @@ class FastGen:
                         attn_bias=bias,
                         cache=cache,
                     )
-                graph.replay()
+                for i in range(10):
+                    graph.replay()
                 # synchronize to get accurate timings
                 torch.cuda.synchronize()
                 stats.phase("graph", tokens=(niter + 1) * bs)
-            else:
-                graph.replay()
 
             # output: (sum(token_lengths), vocab_size)
             # print(output.shape)
@@ -172,36 +179,49 @@ class FastGen:
             # print(q_seqstart[1:] - 1)
             logits = logits.view(bs, self.model_args.vocab_size)
 
-            if self.gen_args.use_sampling:
-                temp = self.gen_args.temperature
-                top_p = self.gen_args.top_p
-                probs = torch.softmax(logits / temp, dim=-1)
-                next_token = sample_utils.top_p(probs, top_p)
-            else:
-                next_token = torch.argmax(logits, dim=-1)
+            next_token = torch.argmax(logits, dim=-1)
 
             next_token = next_token.reshape(bs)
             out_tokens[niter, :] = next_token
-            print(out_tokens.shape)
+            # print(out_tokens.shape)
 
             # Update attention bias state for decoding rounds
             if niter == 0:
+                stats.phase("prefill", tokens=18)
+                for i in range(10):
+                    graph.replay()
                 q_seqstart.copy_(torch.arange(bs + 1, dtype=torch.int))
-                print("bias.q_seqinfo.min_seqlen: ", bias.q_seqinfo.min_seqlen)
-                print("bias.q_seqinfo.max_seqlen: ", bias.q_seqinfo.max_seqlen)
+                # print("bias.q_seqinfo.min_seqlen: ", bias.q_seqinfo.min_seqlen)
+                # print("bias.q_seqinfo.max_seqlen: ", bias.q_seqinfo.max_seqlen)
                 bias.q_seqinfo.min_seqlen = 1
                 bias.q_seqinfo.max_seqlen = 1
                 bias.q_seqinfo.seqstart_py = q_seqstart.tolist()
-                print("q_seqstart: ", q_seqstart)
-                print("tokens-1: ", tokens)
+                # print(bias.q_seqinfo)
+                # print(bias.k_seqinfo)
+                # mask = bias.materialize(shape=[1, 118])
+                # print(mask)
+                # print("q_seqstart: ", q_seqstart)
+                # print("tokens-1: ", tokens)
                 tokens = tokens[:bs]
-                print("tokens-2: ", tokens)
+                # print("tokens-2: ", tokens)
+
+            if niter == 1:
+                # print('++++++++++')
+                # print(bias.q_seqinfo.seqstart)
+                # print(bias.k_seqinfo.seqstart)
+                # print("kv_seqlen-2: ", bias.k_seqinfo.seqlen)
+                # mask = bias.materialize(shape=[1, 118])
+                # print(mask)
+                stats.phase("decoding", tokens=100)
+                for i in range(100):
+                    graph.replay()
+
 
             kv_seqlen.add_(kv_seqlen < max_seq_length)
-            print("kv_seqlen-2: ", bias.k_seqinfo.seqlen)
+            # print("kv_seqlen-2: ", bias.k_seqinfo.seqlen)
 
             tokens.copy_(next_token)
-            print("tokens: ", tokens)
+            # print("tokens: ", tokens)
 
         stats.end_phase(tokens=gen_length * bs)
 
@@ -232,9 +252,7 @@ def get_prompts(interactive: bool) -> Iterable[list[str]]:
             yield prompts
     else:
         yield [
-            "abc",
             "can you write a hello world program in C#",
-            "peux tu resoudre le probleme des tours de Hanoi en ocaml",
         ]
 
 
@@ -262,9 +280,9 @@ def main(ckpt_dir: str, interactive: bool = False, add_instruction_tags: bool = 
 
         if mp_utils.get_rank() == 0:
             for i, prompt in enumerate(prompts):
-                print(f"> {prompt}")
-                answer = g.tokenizer.decode(out_tokens[i])
-                print(answer)
+                # print(f"> {prompt}")
+                # answer = g.tokenizer.decode(out_tokens[i])
+                # print(answer)
                 print("---------------")
 
             for phase_stats in stats.phases:
