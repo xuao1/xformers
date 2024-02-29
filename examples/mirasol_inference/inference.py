@@ -187,9 +187,9 @@ def sequential_V_exec(models, caches, graphs):
     av_embeddings = encoder(av_encoder_input)
     print("av_embeddings: ", av_embeddings.shape)
 
-    text_max_seq_len = 256
-    out = decoder.wrapped_decoder.generate(text_tokens, seq_len = text_max_seq_len, context = av_embeddings)
-    print("out: ", out.shape)
+    # text_max_seq_len = 256
+    # out = decoder.wrapped_decoder.generate(text_tokens, seq_len = text_max_seq_len, context = av_embeddings)
+    # print("out: ", out.shape)
 
     ## prepare cuda graphs for models
     recording_kwargs = {}
@@ -221,17 +221,12 @@ def sequential_V_exec(models, caches, graphs):
         av_embeddings = encoder(av_encoder_input)
     encoder_graph.replay()
 
-    # with torch.cuda.graph(decoder_graph, **recording_kwargs):
-    #     out = decoder.wrapped_decoder.generate(text_tokens, seq_len = text_max_seq_len, context = av_context)
-    # decoder_graph.replay()
-
     torch.cuda.synchronize()
 
     vision_graph.replay()
     audio_graph.replay()
     combiner_graph.replay()
     encoder_graph.replay()
-    # decoder_graph.replay()
 
     torch.cuda.synchronize()
 
@@ -240,18 +235,19 @@ def sequential_V_exec(models, caches, graphs):
 
 def sequential_LA_exec(models, caches, double_caches, decoder_graph):
 
-    torch.cuda.set_device(0)
     _, _, text_tokens = caches
     _, _, _, _, decoder = models
     _, _, _, _, av_context = double_caches
 
     text_max_seq_len = 256
     recording_kwargs = {}
+    out = decoder.wrapped_decoder.make_graph(text_tokens, seq_len = text_max_seq_len, context = av_context)
+    
     with torch.cuda.graph(decoder_graph, **recording_kwargs):
-        out = decoder.wrapped_decoder.generate(text_tokens, seq_len = text_max_seq_len, context = av_context)
-    # decoder_graph.replay()
+        out = decoder.wrapped_decoder.make_graph(text_tokens, seq_len = text_max_seq_len, context = av_context)
+    decoder_graph.replay()
 
-    # torch.cuda.synchronize()
+    torch.cuda.synchronize()
 
     return out
 
@@ -343,26 +339,41 @@ def graph_V_exec(round_id, models, caches, double_caches):
     print('graph_V_exec prepared')
 
     streams = [torch.cuda.Stream() for _ in range(4)]
+    stream_high_priority = torch.cuda.Stream(priority=-1)
+    stream_low_priority = torch.cuda.Stream(priority=0)
     start_time = time.time()
-    for i in range(20):
+    all_sliced = True
+    for i in range(1500):
         round_id.put(i)
-        with torch.cuda.stream(streams[0]):
-            vision_graph.replay()
-            #TODO: We have to know the overhead of this copy operation
-            # video_buffers[i%2].copy_(encoded_video)
+        if all_sliced:
 
-        with torch.cuda.stream(streams[1]):
-            audio_graph.replay()
-            # audio_buffers[i%2].copy_(encoded_audio)
+            with torch.cuda.stream(streams[3]):
+                encoder_graph.replay()
+                # encoder_buffers[i%2].copy_(av_embeddings)
+                av_context = torch.cat((av_context[:, :15, :], encoder_buffers[i%2]), dim=1)
 
-        with torch.cuda.stream(streams[2]):
-            combiner_graph.replay()
-            # combiner_buffers[i%2].copy_(combiner_output)
+            with torch.cuda.stream(streams[0]):
+                vision_graph.replay()
+                #TODO: We have to know the overhead of this copy operation
+                # video_buffers[i%2].copy_(encoded_video)
 
-        with torch.cuda.stream(streams[3]):
-            encoder_graph.replay()
-            # encoder_buffers[i%2].copy_(av_embeddings)
-            av_context = torch.cat((av_context[:, :15, :], encoder_buffers[i%2]), dim=1)
+            with torch.cuda.stream(streams[1]):
+                audio_graph.replay()
+                # audio_buffers[i%2].copy_(encoded_audio)
+
+            with torch.cuda.stream(streams[2]):
+                combiner_graph.replay()
+                # combiner_buffers[i%2].copy_(combiner_output)
+
+        else:
+            with torch.cuda.stream(stream_high_priority):
+                vision_graph.replay()
+                audio_graph.replay()
+                combiner_graph.replay()
+
+            with torch.cuda.stream(stream_low_priority):
+                encoder_graph.replay()
+                av_context = torch.cat((av_context[:, :15, :], encoder_buffers[i%2]), dim=1)
 
         torch.cuda.synchronize()
 
@@ -375,6 +386,8 @@ def graph_LA_exec(round_id, models, caches, double_caches):
     print('graph_LA_exec')
     decoder_graph = torch.cuda.CUDAGraph()
     tensor = sequential_LA_exec(models, caches, double_caches, decoder_graph)
+    for i in range(200):
+        decoder_graph.replay()
     # audio_buffers, video_buffers, combiner_buffers, encoder_buffers, av_context = double_caches
     # text_max_seq_len = 256
     # av_context = torch.cat((av_context[:, :15, :], encoder_buffers[0]), dim=1)
@@ -398,10 +411,8 @@ def graph_parallel_exec(models, caches, double_caches):
     LA_process = Process(target=graph_LA_exec, args=(round_id, models, caches, double_caches))
 
     print("graph_parallel_exec-3")
-    processes = [V_process, LA_process]
-    # for process in processes:
-    #     process.start()
 
+    processes = [V_process, LA_process]
     V_process.start()
     time.sleep(1)
     LA_process.start()

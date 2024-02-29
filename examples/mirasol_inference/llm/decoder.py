@@ -50,6 +50,6 @@ class mirasol_decoder(nn.Module):
         )
 
     @beartype
-    def forward(self, x):
-        x = self.encoder(x)
+    def forward(self, x, seq_len, context):
+        x = self.wrapped_decoder.generate(x, seq_len=seq_len, context=context)
         return x
