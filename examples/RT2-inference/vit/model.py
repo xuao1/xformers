@@ -5,12 +5,12 @@ from beartype.typing import Optional, Union, Tuple, Dict, Any
 
 from x_transformers import Encoder
 
-class audio_encoder(nn.Module):
+class vision_transformer(nn.Module):
 
     @beartype
     def __init__(
         self,
-        dim=512,
+        dim=4096,
         flash_attn=True
         ):
 
@@ -19,20 +19,16 @@ class audio_encoder(nn.Module):
             dim = dim,
             flash_attn = flash_attn
         )
-        audio_encoder_kwargs = dict(
-            dim = dim,
+        video_encoder_kwargs = dict(
+            dim = 4096,
             depth = 2
         )
-        self.audio_encoder = Encoder(**{
+        self.video_encoder = Encoder(**{
             **default_vit_kwargs,
-            **audio_encoder_kwargs
+            **video_encoder_kwargs
         })
 
     @beartype
     def forward(self, x):
-        x = self.audio_encoder(x)
+        x = self.video_encoder(x)
         return x
-
-
-
-

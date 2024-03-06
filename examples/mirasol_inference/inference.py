@@ -233,7 +233,7 @@ def sequential_V_exec(models, caches, graphs):
     return encoded_video, encoded_audio, combiner_output, av_embeddings
 
 
-def sequential_LA_exec(models, caches, double_caches, decoder_graph):
+def sequential_LA_exec(models, caches, double_caches, decoder_graph, decoder_decode_graph):
 
     _, _, text_tokens = caches
     _, _, _, _, decoder = models
@@ -241,15 +241,25 @@ def sequential_LA_exec(models, caches, double_caches, decoder_graph):
 
     text_max_seq_len = 256
     recording_kwargs = {}
-    out = decoder.wrapped_decoder.make_graph(text_tokens, seq_len = text_max_seq_len, context = av_context)
-    
-    with torch.cuda.graph(decoder_graph, **recording_kwargs):
-        out = decoder.wrapped_decoder.make_graph(text_tokens, seq_len = text_max_seq_len, context = av_context)
-    decoder_graph.replay()
 
+    ## Make cuda graph for the prefill phase
+    kv_cache = None
+    out, new_cache = decoder.wrapped_decoder.make_graph(text_tokens, seq_len = text_max_seq_len, context = av_context, kv_cache = kv_cache)
+    with torch.cuda.graph(decoder_graph, **recording_kwargs):
+        out, new_cache = decoder.wrapped_decoder.make_graph(text_tokens, seq_len = text_max_seq_len, context = av_context, kv_cache = kv_cache)
+    decoder_graph.replay()
     torch.cuda.synchronize()
 
-    return out
+    ## Make cuda graph for the decode phase
+    single_token = torch.randint(0, 256, (1, 1)).to("cuda")
+    kv_cache = new_cache
+    out, new_cache = decoder.wrapped_decoder.make_graph(single_token, seq_len = text_max_seq_len, context = av_context, kv_cache = kv_cache)
+    with torch.cuda.graph(decoder_decode_graph, **recording_kwargs):
+        out, new_cache = decoder.wrapped_decoder.make_graph(single_token, seq_len = text_max_seq_len, context = av_context, kv_cache = kv_cache)
+    decoder_decode_graph.replay()
+    torch.cuda.synchronize()
+
+    return out, new_cache
 
 def stream_V_exec(round_id, models, caches, double_caches):
     audio_tokens, video_tokens, text_tokens = caches
@@ -385,9 +395,28 @@ def graph_V_exec(round_id, models, caches, double_caches):
 def graph_LA_exec(round_id, models, caches, double_caches):
     print('graph_LA_exec')
     decoder_graph = torch.cuda.CUDAGraph()
-    tensor = sequential_LA_exec(models, caches, double_caches, decoder_graph)
-    for i in range(200):
-        decoder_graph.replay()
+    decoder_decode_graph = torch.cuda.CUDAGraph()
+    tensor, new_cache = sequential_LA_exec(models, caches, double_caches, decoder_graph, decoder_decode_graph)
+    LA_streams = [torch.cuda.Stream() for _ in range(2)]
+    
+    with torch.cuda.stream(LA_streams[0]):
+        for i in range(200):
+            decoder_graph.replay()
+        torch.cuda.synchronize()
+
+    with torch.cuda.stream(LA_streams[1]):
+        for j in range(200):
+            decoder_decode_graph.replay()
+    
+    torch.cuda.synchronize()
+    print("Empty cache.")
+    torch.cuda.empty_cache()
+
+    # torch.cuda.synchronize()
+    # with torch.cuda.stream(LA_streams[1]):
+    #     for i in range(200):
+    #         decoder_decode_graph.replay()
+
     # audio_buffers, video_buffers, combiner_buffers, encoder_buffers, av_context = double_caches
     # text_max_seq_len = 256
     # av_context = torch.cat((av_context[:, :15, :], encoder_buffers[0]), dim=1)
@@ -397,30 +426,24 @@ def graph_LA_exec(round_id, models, caches, double_caches):
 def graph_parallel_exec(models, caches, double_caches):
 
     # round_id = mp.Value("i", 0)
-    print("graph_parallel_exec-1")
     round_id = mp.Queue()
     # manager = mp.Manager()
     audio_buffers, video_buffers, combiner_buffers, encoder_buffers, av_context = double_caches
-    print("graph_parallel_exec-2")
     
     # shared_tensor = manager.dict()
     # shared_tensor[''] = 
     # shared_tensor[''] = 
 
-    V_process = Process(target=graph_V_exec,  args=(round_id, models, caches, double_caches))
+    # V_process = Process(target=graph_V_exec,  args=(round_id, models, caches, double_caches))
     LA_process = Process(target=graph_LA_exec, args=(round_id, models, caches, double_caches))
 
-    print("graph_parallel_exec-3")
-
-    processes = [V_process, LA_process]
-    V_process.start()
-    time.sleep(1)
+    # processes = [V_process, LA_process]
+    processes = [LA_process]
+    # V_process.start()
+    # time.sleep(1)
     LA_process.start()
-
     for process in processes:
         process.join()
-
-    print("graph_parallel_exec-4")
 
 
 def parallel_exec(models, caches, double_caches):
@@ -467,37 +490,38 @@ if __name__ == "__main__":
     mp.set_start_method('spawn')
     torch.cuda.set_device(0)
     # os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = "100"
+    dimension = 512
 
     ## prepare tensors (input)
     print('prepare tensors (input)')
-    audio_tokens = torch.randn(1, 12, 4096).to("cuda")
-    video_tokens = torch.randn(1, 12, 4096).to("cuda")
+    audio_tokens = torch.randn(1, 12, dimension).to("cuda")
+    video_tokens = torch.randn(1, 12, dimension).to("cuda")
     text_tokens = torch.randint(0, 256, (1, 128)).to("cuda")
     caches = [audio_tokens, video_tokens, text_tokens]
 
     ## prepare intermediate double buffers (output)
     print('prepare intermediate double buffers (output)')
-    audio_buffers = [torch.randn(1, 1, 4, 4096).to("cuda") for _ in range(2)]
-    video_buffers = [torch.randn(1, 1, 4, 4096).to("cuda") for _ in range(2)]
-    combiner_buffers = [torch.randn(1, 8, 4096).to("cuda") for _ in range(2)]
-    encoder_buffers = [torch.randn(1, 3, 4096).to("cuda") for _ in range(2)]
-    av_context = torch.randn(1, 18, 4096).to("cuda")
+    audio_buffers = [torch.randn(1, 1, 4, dimension).to("cuda") for _ in range(2)]
+    video_buffers = [torch.randn(1, 1, 4, dimension).to("cuda") for _ in range(2)]
+    combiner_buffers = [torch.randn(1, 8, dimension).to("cuda") for _ in range(2)]
+    encoder_buffers = [torch.randn(1, 3, dimension).to("cuda") for _ in range(2)]
+    av_context = torch.randn(1, 18, dimension).to("cuda")
     double_caches = [audio_buffers, video_buffers, combiner_buffers, encoder_buffers, av_context]
 
     ## prepare intermediate buffer (input) for CUDAgraph
     print('prepare intermediate buffer (input) for CUDAgraph')
-    encoded_video = torch.randn(1, 1, 4, 4096).to("cuda")
-    encoded_audio = torch.randn(1, 1, 4, 4096).to("cuda")
-    combined_audio_video_tokens = torch.randn(1, 8, 4096).to("cuda")
-    av_embeddings = torch.randn(1, 3, 4096).to("cuda")
+    encoded_video = torch.randn(1, 1, 4, dimension).to("cuda")
+    encoded_audio = torch.randn(1, 1, 4, dimension).to("cuda")
+    combined_audio_video_tokens = torch.randn(1, 8, dimension).to("cuda")
+    av_embeddings = torch.randn(1, 3, dimension).to("cuda")
 
     ## prepare components
     print('prepare components')
-    vision_enc = vision_encoder().to("cuda")
-    audio_enc = audio_encoder().to("cuda")
-    combiner_enc = combiner().to("cuda")
-    encoder = mirasol_encoder().to("cuda")
-    decoder = mirasol_decoder().to("cuda")
+    vision_enc = vision_encoder(dim=dimension).to("cuda")
+    audio_enc = audio_encoder(dim=dimension).to("cuda")
+    combiner_enc = combiner(dim=dimension).to("cuda")
+    encoder = mirasol_encoder(dim=dimension).to("cuda")
+    decoder = mirasol_decoder(dim=dimension).to("cuda")
     models = [vision_enc, audio_enc, combiner_enc, encoder, decoder]
     print('preparation finished')
 
@@ -505,3 +529,5 @@ if __name__ == "__main__":
     # parallel_exec(models, caches, double_caches)
     # stream_parallel_exec(models, caches, double_caches)
     graph_parallel_exec(models, caches, double_caches)
+
+    print('Finished.')

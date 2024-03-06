@@ -10,7 +10,7 @@ class mirasol_encoder(nn.Module):
     @beartype
     def __init__(
         self,
-        dim=4096,
+        dim=512,
         encoder_depth=6,
         attn_dim_head=64,
         attn_heads=8,

@@ -10,7 +10,7 @@ class vision_encoder(nn.Module):
     @beartype
     def __init__(
         self,
-        dim=4096,
+        dim=512,
         flash_attn=True
         ):
 
@@ -20,7 +20,7 @@ class vision_encoder(nn.Module):
             flash_attn = flash_attn
         )
         video_encoder_kwargs = dict(
-            dim = 4096,
+            dim = dim,
             depth = 2
         )
         self.video_encoder = Encoder(**{
