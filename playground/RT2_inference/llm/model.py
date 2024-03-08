@@ -4,6 +4,10 @@ from beartype import beartype
 from x_transformers import Decoder, TransformerWrapper, AutoregressiveWrapper
 # from flashinfer_transformer import flashinfer_decoder
 
+
+class flash_palme(nn.Module):
+    pass
+
 class palme(nn.Module):
 
     @beartype
