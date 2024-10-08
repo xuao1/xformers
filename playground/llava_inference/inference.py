@@ -355,14 +355,17 @@ class LLaVa_engine:
                     all_graph_group.append(graph_group)
             
             for i in range(args.trail_num + args.warmup_num):
+                print("xxxx ", i)
                 if i == args.warmup_num:
                     start_time = time.time()
 
                 for group in all_graph_group:
                     for j, graph_name in enumerate(group):
-                        # print("execute: ", graph_name)
+                        print("execute: ", graph_name)
                         with torch.cuda.stream(self.streams[j]):
+                            print("x2 ", group[graph_name])
                             group[graph_name].replay()
+                            # torch.cuda.synchronize()
                     torch.cuda.synchronize()
             
             frame_interval = (time.time() - start_time) / args.trail_num

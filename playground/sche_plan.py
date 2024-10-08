@@ -5,7 +5,7 @@ import torch
 import argparse
 import sys
 import yaml
-sys.path.append("../../repos/x-transformers")
+sys.path.append("../../x-transformers")
 from utils.util_func import max_below_threshold
 import xformers
 
