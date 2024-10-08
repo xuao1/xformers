@@ -117,6 +117,7 @@ class SimuQueryManage:
             return task_plan
 
     def update_task(self, enable_recompute: bool):
+        print("120 update_task enable_recompute", enable_recompute)
         if not enable_recompute:
             return
         else:
