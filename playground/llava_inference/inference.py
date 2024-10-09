@@ -21,6 +21,8 @@ from einops import rearrange, repeat, reduce, pack, unpack
 from einops.layers.torch import Rearrange
 from sche_plan import args, pattern_analyze
 
+import torch.profiler
+
 
 class LLaVa_engine:
     # [TODO]: The projection and tokenizers are omitted in this implementation!
@@ -360,12 +362,19 @@ class LLaVa_engine:
                     start_time = time.time()
 
                 for group in all_graph_group:
-                    for j, graph_name in enumerate(group):
-                        print("execute: ", graph_name)
-                        with torch.cuda.stream(self.streams[j]):
-                            print("x2 ", group[graph_name])
-                            group[graph_name].replay()
-                            # torch.cuda.synchronize()
+                    with torch.profiler.profile(
+                        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                        profile_memory=True
+                    ) as prof:
+                        for j, graph_name in enumerate(group):
+
+                            print("execute: ", graph_name)
+                            with torch.cuda.stream(self.streams[j]):
+                                print("x2 ", group[graph_name])
+                                group[graph_name].replay()
+                                # torch.cuda.synchronize()
+                    print("after for group in all_graph_group")
+                    prof.export_chrome_trace(f"profile_trace.json")
                     torch.cuda.synchronize()
             
             frame_interval = (time.time() - start_time) / args.trail_num

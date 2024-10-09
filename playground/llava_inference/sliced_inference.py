@@ -10,7 +10,7 @@ import torch.multiprocessing as mp
 from torch.multiprocessing import Process, Value, Array
 
 import torch.cuda.profiler as profiler
-from cuda import cuda, cudart
+# from cuda import cuda, cudart
 
 from .encoder.model import vision_transformer, vit_sliced
 from .llm.model import llama, llama_sliced
