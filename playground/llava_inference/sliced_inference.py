@@ -59,14 +59,17 @@ class LLaVa_sliced_engine:
                 ts_decode_list.append(list(item.values())[0])
 
         # The below arrangement is specific to different model
+        print("len(ts_encode_list): ", len(ts_encode_list))
+        print("len(ts_prefill_list): ", len(ts_prefill_list))
+        print("len(ts_decode_list): ", len(ts_decode_list))
         recording_kwargs = {}
         if len(ts_decode_list) != 0:
             bs = len(ts_decode_list)
-            # print("len(ts_decode_list): ", bs)
+            print("len(ts_decode_list): ", bs)
             self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(
                 graph_input = self.caches['batch_single_token'][:bs, ...],
                 seq_len = self.text_max_seq_len,
-                kv_cache = self.caches['kv_cache_bs' + str(bs)],
+                kv_cache = self.caches['kv_cache_bs' + str(bs)],        # ? 全是 decode 6 
                 slice_num = args.decode_n,
                 slice_id = 0,
                 pre_compute = True,
@@ -126,7 +129,7 @@ class LLaVa_sliced_engine:
         self.caches['img'] = torch.randn(1, 3, 336, 336).to("cuda")
         self.caches['text'] = [torch.randint(0, 256, (1, self.input_seq_len)).to("cuda") for i in range(16)]
 
-        max_active_req = 1
+        max_active_req = 1              # ？ 只在这里初始化为 1
         all_kv_cache_requirement = []
 
         for ts_detail in all_ts_detail:
@@ -149,7 +152,7 @@ class LLaVa_sliced_engine:
 
         print("all_kv_cache_requirement: ", all_kv_cache_requirement)
 
-        decoder_layer_num = 4
+        decoder_layer_num = 8   # TODO    
         k_cache = [torch.randn(max_active_req, 32, self.input_seq_len, 128).half().to("cuda") for i in range(decoder_layer_num)] #16 is the number of layers
         v_cache = [torch.randn(max_active_req, 32, self.input_seq_len, 128).half().to("cuda") for i in range(decoder_layer_num)]
 
@@ -158,6 +161,9 @@ class LLaVa_sliced_engine:
             kv_cache.attn_intermediates = [Intermediates()] * decoder_layer_num  #16 is the number of layers
             for layer in range(decoder_layer_num):
                 kv_cache.attn_intermediates[layer].cached_kv = (k_cache[layer][:bs, ...], v_cache[layer][:bs, ...])
+                # k_cache[layer] 取出了第 layer 层解码器的键缓存张量。这个张量的形状是 (max_active_req, 32, input_seq_len, 128)。
+                # :bs 表示对张量的第一个维度（即 max_active_req 维度）进行切片，取前 bs 个元素      # ？
+                # ...（三点省略号）是Python中表示“其余维度”的简写形式。也就是说，它保持剩下的三个维度（32, input_seq_len, 128）不变，返回整个子张量
             self.caches['kv_cache_bs' + str(bs)] = kv_cache
     
         self.caches['batch_single_token'] = torch.randint(0, 256, (max_active_req, 1)).to("cuda")
@@ -194,8 +200,9 @@ class LLaVa_sliced_engine:
             if i == args.warmup_num:
                 start_time = time.time()
 
-            for group in self.all_graph_group:
+            for group in self.all_graph_group:              # ？ 一次迭代执行全部 graph？
                 for j, graph_name in enumerate(group):
+                    # print("j ", j, "graph_name ", graph_name)
                     # if i == 0:
                     with torch.cuda.stream(self.streams[j]):
                         if i == args.warmup_num:

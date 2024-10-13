@@ -8,15 +8,19 @@ decode_len: 6
 
 simu_ts_len: 500
 real_run: True
-mode: "parallel_sp"
+# mode: "parallel_sp"
+# mode: "ours"
+mode: "seq"
 profile_mode: "flashinfer"
 verbose: 0
 
-req_interval: 0.1474
+req_interval: 0.1854
 query_interval: 1
 model: "llava"
+# enable_slice: True
 enable_slice: False
 
-trail_num: 20
+trail_num: 200
 warmup_num: 10
-worker_num: 4
+worker_num: 1
+num_trails: 200

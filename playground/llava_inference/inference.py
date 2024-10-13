@@ -23,6 +23,8 @@ from sche_plan import args, pattern_analyze
 
 import torch.profiler
 
+from x_transformers import LayerIntermediates
+from x_transformers.attend import Intermediates
 
 class LLaVa_engine:
     # [TODO]: The projection and tokenizers are omitted in this implementation!
@@ -46,6 +48,18 @@ class LLaVa_engine:
         self.models = {'vit': vit, 
                        'llm': llm}
 
+        # prepare caches
+        max_batch_size = 8 # ? 6
+        decoder_layer_num = 8
+        k_cache = [torch.randn(max_batch_size, 32, self.input_seq_len, 128).half().to("cuda") for i in range(decoder_layer_num)] #16 is the number of layers
+        v_cache = [torch.randn(max_batch_size, 32, self.input_seq_len, 128).half().to("cuda") for i in range(decoder_layer_num)]
+
+        kv_cache = LayerIntermediates()
+        kv_cache.attn_intermediates = [Intermediates()] * decoder_layer_num
+        for layer in range(decoder_layer_num):
+                kv_cache.attn_intermediates[layer].cached_kv = (k_cache[layer][:1, ...], v_cache[layer][:1, ...])
+        self.caches['kv_cache_bs1'] = kv_cache
+
         # prepare cuda graphs
         self.graphs = {'encode': torch.cuda.CUDAGraph(),
                         'prefill': torch.cuda.CUDAGraph(),
@@ -56,15 +70,14 @@ class LLaVa_engine:
         # prepare some streams to use
         self.streams = [torch.cuda.Stream() for _ in range(36)]
 
-        max_batch_size = 8
+        max_batch_size = 8 # ? 6
         self.graphs['batch_decode'] = torch.cuda.CUDAGraph()
         batch_single_token = torch.randint(0, 256, (max_batch_size, 1)).to("cuda")
         self.caches['batch_single_token'] = batch_single_token
         self.k_cache_trans = torch.randn(max_batch_size, 32, self.input_seq_len, 128).half().to("cuda")
         self.v_cache_trans = torch.randn(max_batch_size, 32, self.input_seq_len, 128).half().to("cuda")
         self.trans_cache = [self.k_cache_trans, self.v_cache_trans]
-
-
+        
 
     def generate_cuda_graphs(self):
         recording_kwargs = {}
@@ -73,13 +86,13 @@ class LLaVa_engine:
         # [BUG]: I have to run the following command once to make the cuda graph generated properly
         # [FIXME]: The output caches of the graphs have not been designed yet
         # [FIXME]: The decode phase is static, which is just an approximate
-        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'], 
+        prefill_out, prefill_new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'], 
                                                             seq_len = self.text_max_seq_len,
                                                             kv_cache = None)
-        del out
-        del new_cache
+        del prefill_out
+        del prefill_new_cache
         with torch.cuda.graph(self.graphs['prefill'], **recording_kwargs):
-            self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'], 
+            self.prefill_out, self.prefill_new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'], 
                                                                 seq_len = self.text_max_seq_len, 
                                                                 kv_cache = None)
         self.graphs['prefill'].replay()
@@ -89,15 +102,15 @@ class LLaVa_engine:
         print("====== Graph for prefill generated ======")
 
         ## Make cuda graph for the decode phase
-        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['single_token'], 
+        decode_out, decode_new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['single_token'], 
                                                             seq_len = self.text_max_seq_len, 
-                                                            kv_cache = self.new_cache)
-        del out
-        del new_cache
+                                                            kv_cache = self.caches['kv_cache_bs1'])
+        del decode_out
+        del decode_new_cache
         with torch.cuda.graph(self.graphs['decode'], **recording_kwargs):
-            self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['single_token'], 
+            self.decode_out, self.decode_new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['single_token'], 
                                                                 seq_len = self.text_max_seq_len, 
-                                                                kv_cache = self.new_cache)
+                                                                kv_cache = self.caches['kv_cache_bs1'])
         self.graphs['decode'].replay()
         torch.cuda.synchronize()
         print("====== Graph for decode generated ======")
@@ -435,8 +448,11 @@ def llava_run(sche_plan=None, mode='profile'):
                                num_trails=100,
                                sche_plan=sche_plan)
     elif mode == 'parallel_sp':
+        print("in parallel_sp, worker_num = ", args.worker_num, " num_trails = ", args.num_trails)
         worker_num = args.worker_num
+        print("+++++++++++++ Before create LLaVa engine")
         e = [LLaVa_engine(idx=i) for i in range(worker_num)]
+        print("After create LLaVa engine")
         start = time.time()
 
         streams = [torch.cuda.Stream() for i in range(worker_num)]
@@ -444,6 +460,7 @@ def llava_run(sche_plan=None, mode='profile'):
         end_events = [torch.cuda.Event(enable_timing=True) for _ in range(args.num_trails)]
 
         for i in range(args.num_trails):
+            # print("----------------------------- i in in range(args.num_trails): ", i)
             worker_id = i%worker_num
             time.sleep(args.req_interval)
 
