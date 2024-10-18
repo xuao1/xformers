@@ -77,7 +77,7 @@ class LLaVa_sliced_engine:
             )
             # print("self.out, self.new_cache: ", self.out.shape, self.new_cache.attn_intermediates[1].cached_kv[0].shape)
             new_graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(new_graph, **recording_kwargs):
+            with torch.cuda.graph(new_graph, stream=self.streams[0]):
                 self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(
                     self.caches['batch_single_token'][:bs, ...],
                     seq_len = self.text_max_seq_len,
@@ -102,7 +102,7 @@ class LLaVa_sliced_engine:
                                                                         slice_id = ts_prefill_list[i],
                                                                         kv_cache = None)
                 graph_group['p' + str(ts_prefill_list[i])] = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph_group['p' + str(ts_prefill_list[i])], stream=self.streams[i+1]):
+                with torch.cuda.graph(graph_group['p' + str(ts_prefill_list[i])], stream=self.streams[1]):
                     # TODO: This is not correct
                     self.prefill_cache[i], self.new_cache_tmp[i] = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'][i], 
                                                                         seq_len = 256, 
@@ -115,7 +115,7 @@ class LLaVa_sliced_engine:
             for i in range(len(ts_encode_list)):
                 out = self.models['vit'](self.caches['img'], slice_num = args.encoder_n, slice_id = ts_encode_list[i])
                 graph_group['e' + str(ts_encode_list[i])] = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph_group['e' + str(ts_encode_list[i])] , **recording_kwargs):
+                with torch.cuda.graph(graph_group['e' + str(ts_encode_list[i])] , stream=self.streams[2]):
                     out = self.models['vit'](self.caches['img'], slice_num = args.encoder_n, slice_id = ts_encode_list[i])
                 graph_group['e' + str(ts_encode_list[i])].replay()
 
