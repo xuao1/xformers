@@ -62,7 +62,7 @@ class llama_sliced(nn.Module):
         dim=4096,
         num_text_tokens=1024,
         text_max_seq_len=4096,
-        decoder_depth=32,
+        decoder_depth=8,
         attn_dim_head=128,  # 128 = dim/attn_heads = 4096/32
         attn_heads=32,
         attn_layers_kwargs: dict = dict(),

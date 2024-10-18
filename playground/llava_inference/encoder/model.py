@@ -62,6 +62,7 @@ class vit_sliced(nn.Module):
         )
 
     @beartype
-    def forward(self, x):
-        x = self.encoder(x, return_embeddings=True, sliced_id=sliced_id)
+    def forward(self, x, slice_num=1, slice_id=0):
+        x = self.encoder(x, return_embeddings=True, slice_num=slice_num, slice_id=slice_id)
+        # x = self.encoder(x, return_embeddings=True, sliced_id=sliced_id)
         return x
