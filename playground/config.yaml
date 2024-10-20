@@ -15,7 +15,7 @@ profile_mode: "flashinfer"
 verbose: 0
 
 req_interval: 0.1854
-query_interval: 1
+query_interval: 2
 model: "llava"
 enable_slice: True
 # enable_slice: False

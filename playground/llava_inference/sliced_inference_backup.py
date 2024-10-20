@@ -65,7 +65,7 @@ class LLaVa_sliced_engine:
         recording_kwargs = {}
         if len(ts_decode_list) != 0:
             bs = len(ts_decode_list)
-            print("len(ts_decode_list): ", bs)
+            # print("len(ts_decode_list): ", bs)
             self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(
                 graph_input = self.caches['batch_single_token'][:bs, ...],
                 seq_len = self.text_max_seq_len,
