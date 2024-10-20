@@ -202,6 +202,8 @@ class LLaVa_engine:
     def run_L_cuda_graphs(self, num_trails=1, out_seq_len=64, required_sync=True):
         for i in range(num_trails):
             self.graphs['prefill'].replay()
+            if required_sync:
+                torch.cuda.synchronize()
             for token in range(out_seq_len-1):
                 self.graphs['decode'].replay()
                 if required_sync:
@@ -220,17 +222,18 @@ class LLaVa_engine:
 
 
     def run_single_request(self, durations, i):
+        # seq needs required_sync to be True
         worker_num = 2
         stream_id = i%worker_num
         req_start = time.time()
 
         with torch.cuda.stream(self.streams[stream_id]):
-            self.run_V_cuda_graphs(num_trails=1, required_sync=False)
-            self.run_L_cuda_graphs(num_trails=1, out_seq_len=args.decode_len+args.prefill_len, required_sync=False)
+            self.run_V_cuda_graphs(num_trails=1, required_sync=True)
+            self.run_L_cuda_graphs(num_trails=1, out_seq_len=args.decode_len+args.prefill_len, required_sync=True)
         
         self.streams[stream_id].synchronize()
         duration = time.time() - req_start
-        print("Request duration: {:.3f} ms".format(duration*1000))
+        print("XXX Request duration: {:.3f} ms".format(duration*1000))
         durations.append(time.time() - req_start)
 
 
