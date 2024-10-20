@@ -24,6 +24,7 @@ from sche_plan import args, pattern_analyze, pattern_analyze_ad
 from x_transformers import LayerIntermediates
 from x_transformers.attend import Intermediates
 
+
 class LLaVa_sliced_engine:
     def __init__(self, sche_plan):
         self.text_max_seq_len = 256
@@ -44,9 +45,8 @@ class LLaVa_sliced_engine:
         llm = llama().to("cuda")
         self.models = {'vit': vit, 
                        'llm': llm}
-
-
-    def generate_graph_group(self, ts_detail):
+        
+    def generate_graph_group(self, ts_detail): 
         graph_group = {}
         ts_encode_list, ts_prefill_list, ts_decode_list = [], [], []
         
@@ -57,15 +57,13 @@ class LLaVa_sliced_engine:
                 ts_prefill_list.append(list(item.values())[0])
             elif list(item.keys())[0] == 'd':
                 ts_decode_list.append(list(item.values())[0])
-
-        # The below arrangement is specific to different model
         print("len(ts_encode_list): ", len(ts_encode_list))
         print("len(ts_prefill_list): ", len(ts_prefill_list))
         print("len(ts_decode_list): ", len(ts_decode_list))
-        recording_kwargs = {}
+
+        # create graph for decode
         if len(ts_decode_list) != 0:
             bs = len(ts_decode_list)
-            print("len(ts_decode_list): ", bs)
             self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(
                 graph_input = self.caches['batch_single_token'][:bs, ...],
                 seq_len = self.text_max_seq_len,
@@ -75,22 +73,23 @@ class LLaVa_sliced_engine:
                 pre_compute = True,
                 post_compute = True,
             )
-            # print("self.out, self.new_cache: ", self.out.shape, self.new_cache.attn_intermediates[1].cached_kv[0].shape)
-            new_graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(new_graph, stream=self.streams[0]):
-                self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(
-                    self.caches['batch_single_token'][:bs, ...],
-                    seq_len = self.text_max_seq_len,
-                    kv_cache = self.caches['kv_cache_bs' + str(bs)],
-                    slice_num = args.decode_n,
-                    slice_id = 0,
-                    pre_compute = True,
-                    post_compute = True,
-                )
-        
-            new_graph.replay()
-            graph_group['d'] = new_graph
-        
+            # crate cuda graph for every cuda stream
+            for i in range(4):
+                new_graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(new_graph, stream=self.streams[i]):
+                    self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(
+                        graph_input = self.caches['batch_single_token'][:bs, ...],
+                        seq_len = self.text_max_seq_len,
+                        kv_cache = self.caches['kv_cache_bs' + str(bs)],        # ? 全是 decode 6 
+                        slice_num = args.decode_n,
+                        slice_id = 0,
+                        pre_compute = True,
+                        post_compute = True,
+                    )
+                new_graph.replay()
+                graph_group['d' + str(i)] = new_graph
+
+        # create graph for prefill
         self.prefill_cache = {}
         self.new_cache_tmp = {}
         if len(ts_prefill_list) != 0:
@@ -101,26 +100,32 @@ class LLaVa_sliced_engine:
                                                                         slice_num = args.prefill_n,
                                                                         slice_id = ts_prefill_list[i],
                                                                         kv_cache = None)
-                graph_group['p' + str(ts_prefill_list[i])] = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph_group['p' + str(ts_prefill_list[i])], stream=self.streams[1]):
-                    # TODO: This is not correct
-                    self.prefill_cache[i], self.new_cache_tmp[i] = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'][i], 
-                                                                        seq_len = 256, 
-                                                                        slice_num = args.prefill_n,
-                                                                        slice_id = ts_prefill_list[i],
-                                                                        kv_cache = None)
-                graph_group['p' + str(ts_prefill_list[i])].replay()                                       
-                                                            
+                # crate cuda graph for every cuda stream
+                for j in range(4):
+                    new_graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(new_graph, stream=self.streams[j]):
+                        self.prefill_cache[i], self.new_cache_tmp[i] = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'][i], 
+                                                                            seq_len = 256, 
+                                                                            slice_num = args.prefill_n,
+                                                                            slice_id = ts_prefill_list[i],
+                                                                            kv_cache = None)
+                    new_graph.replay()
+                    graph_group['p' + str(ts_prefill_list[i]) + str(j)] = new_graph
+
+        # create graph for encode
         if len(ts_encode_list) != 0:
             for i in range(len(ts_encode_list)):
                 out = self.models['vit'](self.caches['img'], slice_num = args.encoder_n, slice_id = ts_encode_list[i])
-                graph_group['e' + str(ts_encode_list[i])] = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph_group['e' + str(ts_encode_list[i])] , stream=self.streams[2]):
-                    out = self.models['vit'](self.caches['img'], slice_num = args.encoder_n, slice_id = ts_encode_list[i])
-                graph_group['e' + str(ts_encode_list[i])].replay()
+                # crate cuda graph for every cuda stream
+                for j in range(4):
+                    new_graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(new_graph, stream=self.streams[j]):
+                        out = self.models['vit'](self.caches['img'], slice_num = args.encoder_n, slice_id = ts_encode_list[i])
+                    new_graph.replay()
+                    graph_group['e' + str(ts_encode_list[i]) + str(j)] = new_graph
 
         return graph_group
-
+    
 
     def manage_cache(self, all_ts_detail):
         self.caches = {}
@@ -193,6 +198,7 @@ class LLaVa_sliced_engine:
             graph_group = self.generate_graph_group(ts_detail)
             self.all_graph_group.append(graph_group)
 
+
     def run_benchmark(self):
         start_events = [torch.cuda.Event(enable_timing=True) for _ in range(10)]
         end_events = [torch.cuda.Event(enable_timing=True) for _ in range(10)]
@@ -207,7 +213,7 @@ class LLaVa_sliced_engine:
                     with torch.cuda.stream(self.streams[j]):
                         if i == args.warmup_num:
                             start_events[j].record()
-                        group[graph_name].replay()
+                        group[graph_name + str(i)].replay()
                         if i == args.warmup_num:
                             end_events[j].record()
                 # for j, graph_name in enumerate(group):
