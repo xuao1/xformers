@@ -102,6 +102,7 @@ class Attention(nn.Module):
         x: torch.Tensor,
         cache: LayerCache,
         attn_bias: AttnBias,
+        position_index: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # x.shape is (sum(seq_lens), dim)
         #
@@ -126,6 +127,7 @@ class Attention(nn.Module):
         xv = xv.view(1, xv.shape[0], self.n_local_kv_heads, 1, self.head_dim)
         cache_k, cache_v = cache
 
+        # rope_padded: 用于在计算 Query, Key, Value 时应用 RoPE 旋转位置编码。这会同时更新缓存中的 Key 和 Value
         xq = rope_padded(
             xq=xq,
             xk=xk,
@@ -141,9 +143,15 @@ class Attention(nn.Module):
         output = fmha.memory_efficient_attention_forward(
             xq, cache_k, cache_v, attn_bias
         )
-
-        output = self.wo(output.reshape(output_shape))
+        output = output.reshape(output_shape)
+        # ？？？？？？？？？？？？？？？？？？？？？？ 应该放在哪里
+        if position_index is not None:
+            output = output[position_index]
+        output = self.wo(output)
         mp_utils.all_reduce(output)
+
+        # if position_index is not None:
+        #     output = output[position_index]
 
         return output
 
@@ -204,7 +212,7 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_index: int):
         super().__init__()
 
         assert args.dim % args.n_heads == 0
@@ -214,10 +222,16 @@ class TransformerBlock(nn.Module):
         else:
             n_kv_heads = args.n_heads
 
+        # print("In TransformerBlock")
+        # print(f"args.dim is {args.dim}, args.n_heads is {args.n_heads}, head_dim is {head_dim}")
+        # args.dim is 4096, args.n_heads is 32, head_dim is 128
+
         mp_size = mp_utils.get_world_size()
         assert args.n_heads % n_kv_heads == 0
         assert args.n_heads % mp_size == 0
         assert n_kv_heads % mp_size == 0
+
+        self.is_last_layer = layer_index + 1 == args.n_layers
 
         self.attention = Attention(
             dim=args.dim,
@@ -241,11 +255,44 @@ class TransformerBlock(nn.Module):
         cache: LayerCache,
         attn_bias: AttnBias,
     ) -> torch.Tensor:
-        h = x + self.attention.forward(
+        position_index = None
+        position_index_tmp = None
+        if self.is_last_layer and attn_bias.q_seqinfo.max_seqlen > 1:
+            position_index = attn_bias.q_seqinfo.seqstart[1:] - 1
+            position_index_tmp = attn_bias.q_seqinfo.seqstart[1:] - 2
+            # print("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXx, position_index is ", position_index)
+            # position_index is  tensor([8], device='cuda:0', dtype=torch.int32)
+
+        h = self.attention.forward(
             self.attention_norm(x),
             cache,
             attn_bias,
+            # position_index=position_index_tmp,
+            position_index=position_index,
         )
+        # print("h is ", h)
+        # print("h shape is ", h.shape)
+        if position_index is not None:
+            # torch.set_printoptions(profile="full")
+            print("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+            print("x = ", x)
+            print("x shape= ", x.shape)
+            print("x[position_index] = ", x[position_index])
+            print("x[position_index] shape = ", x[position_index].shape)
+            print("x[position_index - 1] = ", x[position_index_tmp])
+            # torch.set_printoptions(profile="default")
+            
+            x = x[position_index]
+            # x = x[position_index_tmp]
+            # h = h[position_index]           
+            
+            # torch.set_printoptions(profile="full")
+            print("h = ", h)
+            # torch.set_printoptions(profile="default")
+        # print("h is ", h)
+        # print("x is ", x)
+        h = h + x
+        # print("h = ", h)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -264,8 +311,8 @@ class Transformer(nn.Module):
         )
 
         self.layers = nn.ModuleList()
-        for _ in range(args.n_layers):
-            self.layers.append(TransformerBlock(args))
+        for layer_index in range(args.n_layers):
+            self.layers.append(TransformerBlock(args, layer_index))
 
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
 
@@ -282,11 +329,20 @@ class Transformer(nn.Module):
         attn_bias: AttnBias,
         cache: list[LayerCache],
     ) -> torch.Tensor:
+        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ in forward_with_attn_bias")
         h_parallel = self.tok_embeddings(token_values)
+        # print("token_values is ", token_values)
+        # print("token_values shape is ", token_values.shape)
+        # print("h_parallel is ", h_parallel)
+        # print("h_parallel shape is ", h_parallel.shape)       # [tokens_length, 4096], 前者在 prefill 是 9, decode 时是 1
         h = mp_utils.all_gather(h_parallel)
+        # print("h is ", h)
+        # print("h shape is ", h.shape)                         # 与 h_parallel 形状相同
 
         for i, layer in enumerate(self.layers):
             h = layer(h, cache[i], attn_bias)
+            # print("h is ", h)
+            # print("h shape is ", h.shape)                         # 与 h_parallel 形状相同. prefill 时特殊，前 31 层都是 [9, 4096], 最后一层的输出是 [1, 4096]
 
         logits_parallel = self.output(self.norm(h))
         logits = mp_utils.all_gather(logits_parallel)

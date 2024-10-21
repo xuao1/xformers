@@ -14,8 +14,8 @@ mode: "ours"
 profile_mode: "flashinfer"
 verbose: 0
 
-req_interval: 0.2017
-query_interval: 1
+req_interval: 0.1461
+query_interval: 8
 model: "llava"
 enable_slice: True
 # enable_slice: False
